@@ -433,8 +433,8 @@ def main(args):
         train_loader = create_train_loader(train_subset, BATCH_SIZE, NUM_WORKERS)
         valid_loader = create_valid_loader(valid_subset, BATCH_SIZE, NUM_WORKERS)
         
-        print(f"Number of training samples: {len(train_dataset)}")
-        print(f"Number of validation samples: {len(valid_dataset)}\n")
+        print(f"Number of training samples: {len(train_subset)}")
+        print(f"Number of validation samples: {len(valid_subset)}\n")
 
         for epoch in range(start_epochs, NUM_EPOCHS):
             train_loss_hist.reset()
