@@ -260,28 +260,30 @@ def main(args):
     kf = KFold(n_splits=5, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
     fold_scores = []
 
-    # Create train/valid datasets for this fold
-    train_dataset = create_train_dataset(
-        TRAIN_DIR_IMAGES[train_idx], 
-        TRAIN_DIR_LABELS[train_idx],
-        IMAGE_SIZE,
-        CLASSES,
-        use_train_aug=args['use_train_aug'],
-        mosaic=args['mosaic'],
-        square_training=args['square_training']
-    )
-        
-    valid_dataset = create_valid_dataset(
-        VALID_DIR_IMAGES[valid_idx], 
-        VALID_DIR_LABELS[valid_idx], 
-        IMAGE_SIZE,
-        CLASSES,
-        square_training=args['square_training']
-    )
+
 
     print('Creating data loaders')
     for fold, (train_idx, valid_idx) in enumerate(kf.split(np.arange(len(TRAIN_DIR_IMAGES)))):
         print(f"Training Fold {fold+1}")
+
+        # Create train/valid datasets for this fold
+        train_dataset = create_train_dataset(
+            TRAIN_DIR_IMAGES[train_idx], 
+            TRAIN_DIR_LABELS[train_idx],
+            IMAGE_SIZE,
+            CLASSES,
+            use_train_aug=args['use_train_aug'],
+            mosaic=args['mosaic'],
+            square_training=args['square_training']
+        )
+            
+        valid_dataset = create_valid_dataset(
+            VALID_DIR_IMAGES[valid_idx], 
+            VALID_DIR_LABELS[valid_idx], 
+            IMAGE_SIZE,
+            CLASSES,
+            square_training=args['square_training']
+        )
         
         if args['distributed']:
             train_sampler = distributed.DistributedSampler(
