@@ -276,7 +276,7 @@ def main(args):
     )
     
     # Initialize KFold
-    k=5,
+    k=5
     kf = KFold(n_splits=k, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
     
     # Initialize lists to store metrics for each fold
