@@ -50,7 +50,9 @@ import numpy as np
 import torchinfo
 import os
 from sklearn.model_selection import KFold
-from sklearn.metrics import accuracy_score  # Or mAP, or any other metric you're using
+import numpy as np
+import torch
+from torch.utils.data import Subset
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -255,48 +257,52 @@ def main(args):
 
     # Model configurations
     IMAGE_SIZE = args['imgsz']
+
+    train_dataset = create_train_dataset(
+        TRAIN_DIR_IMAGES, 
+        TRAIN_DIR_LABELS,
+        IMAGE_SIZE, 
+        CLASSES,
+        use_train_aug=args['use_train_aug'],
+        mosaic=args['mosaic'],
+        square_training=args['square_training']
+    )
+    valid_dataset = create_valid_dataset(
+        VALID_DIR_IMAGES, 
+        VALID_DIR_LABELS, 
+        IMAGE_SIZE, 
+        CLASSES,
+        square_training=args['square_training']
+    )
     
     # Initialize KFold
-    kf = KFold(n_splits=5, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
-    fold_scores = []
+    k=5,
+    kf = KFold(n_splits=k, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
+    
+    # Initialize lists to store metrics for each fold
+    fold_losses = []
+    fold_maps = []
 
-    for fold, (train_idx, valid_idx) in enumerate(kf.split(np.arange(len(TRAIN_DIR_IMAGES)))):
-        print(f"Training Fold {fold+1}")
-        
-        # Create train/valid datasets for this fold
-        train_images = TRAIN_DIR_IMAGES[train_idx]
-        train_labels = TRAIN_DIR_LABELS[train_idx]
-        
-        valid_images = VALID_DIR_IMAGES[valid_idx]
-        valid_labels = VALID_DIR_LABELS[valid_idx]
+    for fold, (train_indices, valid_indices) in enumerate(kf.split(train_dataset)):
+        print(f"Fold {fold+1}/{k}")
 
-        train_dataset = create_train_dataset(
-            train_images, 
-            train_labels,
-            args['imgsz'], 
-            CLASSES,
-            use_train_aug=args['use_train_aug'],
-            mosaic=args['mosaic'],
-            square_training=args['square_training']
-        )
-        
-        valid_dataset = create_valid_dataset(
-            valid_images, 
-            valid_labels, 
-            args['imgsz'], 
-            CLASSES,
-            square_training=args['square_training']
-        )
+        # Split dataset into training and validation sets for this fold
+        train_subset = Subset(train_dataset, train_indices)
+        valid_subset = Subset(valid_dataset, valid_indices)
 
-        if args['distributed']:
-            train_sampler = distributed.DistributedSampler(train_dataset)
-            valid_sampler = distributed.DistributedSampler(valid_dataset, shuffle=False)
-        else:
-            train_sampler = RandomSampler(train_dataset)
-            valid_sampler = SequentialSampler(valid_dataset)
+        # Create the data loaders
+        train_loader = create_train_loader(train_subset, BATCH_SIZE, NUM_WORKERS)
+        valid_loader = create_valid_loader(valid_subset, BATCH_SIZE, NUM_WORKERS)
 
-        train_loader = create_train_loader(train_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=train_sampler)
-        valid_loader = create_valid_loader(valid_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=valid_sampler)
+        # if args['distributed']:
+        #     train_sampler = distributed.DistributedSampler(train_dataset)
+        #     valid_sampler = distributed.DistributedSampler(valid_dataset, shuffle=False)
+        # else:
+        #     train_sampler = RandomSampler(train_dataset)
+        #     valid_sampler = SequentialSampler(valid_dataset)
+
+        #train_loader = create_train_loader(train_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=train_sampler)
+        #valid_loader = create_valid_loader(valid_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=valid_sampler)
         
         print(f"Number of training samples: {len(train_dataset)}")
         print(f"Number of validation samples: {len(valid_dataset)}\n")
@@ -369,230 +375,232 @@ def main(args):
         optimizer = torch.optim.SGD(model.parameters(), lr=args['lr'], momentum=0.9)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
             
-    # Make the model transform's `min_size` same as `imgsz` argument. 
-    model.transform.min_size = (args['imgsz'], )
-    model = model.to(DEVICE)
-    if args['sync_bn'] and args['distributed']:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    if args['distributed']:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args['gpu']]
-        )
-    try:
-        torchinfo.summary(
-            model, 
-            device=DEVICE, 
-            input_size=(BATCH_SIZE, 3, IMAGE_SIZE, IMAGE_SIZE),
-            row_settings=["var_names"],
-            col_names=("input_size", "output_size", "num_params") 
-        )
-    except:
-        print(model)
-    # Total parameters and trainable parameters.
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"{total_params:,} total parameters.")
-    total_trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"{total_trainable_params:,} training parameters.")
-    # Get the model parameters.
-    params = [p for p in model.parameters() if p.requires_grad]
-    # Define the optimizer.
-    optimizer = torch.optim.SGD(params, lr=args['lr'], momentum=0.9, nesterov=True)
-    # optimizer = torch.optim.AdamW(params, lr=0.0001, weight_decay=0.0005)
-    if args['resume_training']: 
-        # LOAD THE OPTIMIZER STATE DICTIONARY FROM THE CHECKPOINT.
-        print('Loading optimizer state dictionary...')
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Make the model transform's `min_size` same as `imgsz` argument. 
+        model.transform.min_size = (args['imgsz'], )
+        model = model.to(DEVICE)
+        if args['sync_bn'] and args['distributed']:
+            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        if args['distributed']:
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[args['gpu']]
+            )
+        try:
+            torchinfo.summary(
+                model, 
+                device=DEVICE, 
+                input_size=(BATCH_SIZE, 3, IMAGE_SIZE, IMAGE_SIZE),
+                row_settings=["var_names"],
+                col_names=("input_size", "output_size", "num_params") 
+            )
+        except:
+            print(model)
+        # Total parameters and trainable parameters.
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"{total_params:,} total parameters.")
+        total_trainable_params = sum(
+            p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"{total_trainable_params:,} training parameters.")
+        # Get the model parameters.
+        params = [p for p in model.parameters() if p.requires_grad]
+        # Define the optimizer.
+        optimizer = torch.optim.SGD(params, lr=args['lr'], momentum=0.9, nesterov=True)
+        # optimizer = torch.optim.AdamW(params, lr=0.0001, weight_decay=0.0005)
+        if args['resume_training']: 
+            # LOAD THE OPTIMIZER STATE DICTIONARY FROM THE CHECKPOINT.
+            print('Loading optimizer state dictionary...')
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    if args['cosine_annealing']:
-        # LR will be zero as we approach `steps` number of epochs each time.
-        # If `steps = 5`, LR will slowly reduce to zero every 5 epochs.
-        steps = NUM_EPOCHS + 10
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, 
-            T_0=steps,
-            T_mult=1,
-            verbose=False
-        )
-    else:
-        scheduler = None
+        if args['cosine_annealing']:
+            # LR will be zero as we approach `steps` number of epochs each time.
+            # If `steps = 5`, LR will slowly reduce to zero every 5 epochs.
+            steps = NUM_EPOCHS + 10
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, 
+                T_0=steps,
+                T_mult=1,
+                verbose=False
+            )
+        else:
+            scheduler = None
 
-    save_best_model = SaveBestModel()
-    early_stopping = EarlyStopping(patience=args['patience'])
+        save_best_model = SaveBestModel()
+        early_stopping = EarlyStopping(patience=args['patience'])
 
-    for epoch in range(start_epochs, NUM_EPOCHS):
-        train_loss_hist.reset()
+        for epoch in range(start_epochs, NUM_EPOCHS):
+            train_loss_hist.reset()
 
-        _, batch_loss_list, \
-            batch_loss_cls_list, \
-            batch_loss_box_reg_list, \
-            batch_loss_objectness_list, \
-            batch_loss_rpn_list = train_one_epoch(
-            model, 
-            optimizer, 
-            train_loader, 
-            DEVICE, 
-            epoch, 
-            train_loss_hist,
-            print_freq=100,
-            scheduler=scheduler,
-            scaler=SCALER
-        )
+            _, batch_loss_list, \
+                batch_loss_cls_list, \
+                batch_loss_box_reg_list, \
+                batch_loss_objectness_list, \
+                batch_loss_rpn_list = train_one_epoch(
+                model, 
+                optimizer, 
+                train_loader, 
+                DEVICE, 
+                epoch, 
+                train_loss_hist,
+                print_freq=100,
+                scheduler=scheduler,
+                scaler=SCALER
+            )
 
-        stats, val_pred_image = evaluate(
-            model, 
-            valid_loader, 
-            device=DEVICE,
-            save_valid_preds=SAVE_VALID_PREDICTIONS,
-            out_dir=OUT_DIR,
-            classes=CLASSES,
-            colors=COLORS
-        )
+            stats, val_pred_image = evaluate(
+                model, 
+                valid_loader, 
+                device=DEVICE,
+                save_valid_preds=SAVE_VALID_PREDICTIONS,
+                out_dir=OUT_DIR,
+                classes=CLASSES,
+                colors=COLORS
+            )
 
-        # Append the current epoch's batch-wise losses to the `train_loss_list`.
-        train_loss_list.extend(batch_loss_list)
-        loss_cls_list.append(np.mean(np.array(batch_loss_cls_list,)))
-        loss_box_reg_list.append(np.mean(np.array(batch_loss_box_reg_list)))
-        loss_objectness_list.append(np.mean(np.array(batch_loss_objectness_list)))
-        loss_rpn_list.append(np.mean(np.array(batch_loss_rpn_list)))
+            # Append the current epoch's batch-wise losses to the `train_loss_list`.
+            train_loss_list.extend(batch_loss_list)
+            loss_cls_list.append(np.mean(np.array(batch_loss_cls_list,)))
+            loss_box_reg_list.append(np.mean(np.array(batch_loss_box_reg_list)))
+            loss_objectness_list.append(np.mean(np.array(batch_loss_objectness_list)))
+            loss_rpn_list.append(np.mean(np.array(batch_loss_rpn_list)))
 
-        # Append curent epoch's average loss to `train_loss_list_epoch`.
-        train_loss_list_epoch.append(train_loss_hist.value)
-        val_map_05.append(stats[1])
-        val_map.append(stats[0])
+            # Append curent epoch's average loss to `train_loss_list_epoch`.
+            train_loss_list_epoch.append(train_loss_hist.value)
+            val_map_05.append(stats[1])
+            val_map.append(stats[0])
 
-        # Save loss plot for batch-wise list.
-        save_loss_plot(OUT_DIR, train_loss_list)
-        # Save loss plot for epoch-wise list.
-        save_loss_plot(
-            OUT_DIR, 
-            train_loss_list_epoch,
-            'epochs',
-            'train loss',
-            save_name='train_loss_epoch' 
-        )
-        # Save all the training loss plots.
-        save_loss_plot(
-            OUT_DIR, 
-            loss_cls_list, 
-            'epochs', 
-            'loss cls',
-            save_name='train_loss_cls'
-        )
-        save_loss_plot(
-            OUT_DIR, 
-            loss_box_reg_list, 
-            'epochs', 
-            'loss bbox reg',
-            save_name='train_loss_bbox_reg'
-        )
-        save_loss_plot(
-            OUT_DIR,
-            loss_objectness_list,
-            'epochs',
-            'loss obj',
-            save_name='train_loss_obj'
-        )
-        save_loss_plot(
-            OUT_DIR,
-            loss_rpn_list,
-            'epochs',
-            'loss rpn bbox',
-            save_name='train_loss_rpn_bbox'
-        )
+            # Save loss plot for batch-wise list.
+            save_loss_plot(OUT_DIR, train_loss_list)
+            # Save loss plot for epoch-wise list.
+            save_loss_plot(
+                OUT_DIR, 
+                train_loss_list_epoch,
+                'epochs',
+                'train loss',
+                save_name='train_loss_epoch' 
+            )
+            # Save all the training loss plots.
+            save_loss_plot(
+                OUT_DIR, 
+                loss_cls_list, 
+                'epochs', 
+                'loss cls',
+                save_name='train_loss_cls'
+            )
+            save_loss_plot(
+                OUT_DIR, 
+                loss_box_reg_list, 
+                'epochs', 
+                'loss bbox reg',
+                save_name='train_loss_bbox_reg'
+            )
+            save_loss_plot(
+                OUT_DIR,
+                loss_objectness_list,
+                'epochs',
+                'loss obj',
+                save_name='train_loss_obj'
+            )
+            save_loss_plot(
+                OUT_DIR,
+                loss_rpn_list,
+                'epochs',
+                'loss rpn bbox',
+                save_name='train_loss_rpn_bbox'
+            )
 
-        # Save mAP plots.
-        save_mAP(OUT_DIR, val_map_05, val_map)
+            # Save mAP plots.
+            save_mAP(OUT_DIR, val_map_05, val_map)
 
-        # Save batch-wise train loss plot using TensorBoard. Better not to use it
-        # as it increases the TensorBoard log sizes by a good extent (in 100s of MBs).
-        # tensorboard_loss_log('Train loss', np.array(train_loss_list), writer)
+            # Save batch-wise train loss plot using TensorBoard. Better not to use it
+            # as it increases the TensorBoard log sizes by a good extent (in 100s of MBs).
+            # tensorboard_loss_log('Train loss', np.array(train_loss_list), writer)
 
-        # Save epoch-wise train loss plot using TensorBoard.
-        tensorboard_loss_log(
-            'Train loss', 
-            np.array(train_loss_list_epoch), 
-            writer,
-            epoch
-        )
+            # Save epoch-wise train loss plot using TensorBoard.
+            tensorboard_loss_log(
+                'Train loss', 
+                np.array(train_loss_list_epoch), 
+                writer,
+                epoch
+            )
 
-        # Save mAP plot using TensorBoard.
-        tensorboard_map_log(
-            name='mAP', 
-            val_map_05=np.array(val_map_05), 
-            val_map=np.array(val_map),
-            writer=writer,
-            epoch=epoch
-        )
+            # Save mAP plot using TensorBoard.
+            tensorboard_map_log(
+                name='mAP', 
+                val_map_05=np.array(val_map_05), 
+                val_map=np.array(val_map),
+                writer=writer,
+                epoch=epoch
+            )
 
-        coco_log(OUT_DIR, stats)
-        csv_log(
-            OUT_DIR, 
-            stats, 
-            epoch,
-            train_loss_list,
-            loss_cls_list,
-            loss_box_reg_list,
-            loss_objectness_list,
-            loss_rpn_list
-        )
-
-        # WandB logging.
-        if not args['disable_wandb']:
-            wandb_log(
-                train_loss_hist.value,
-                batch_loss_list,
+            coco_log(OUT_DIR, stats)
+            csv_log(
+                OUT_DIR, 
+                stats, 
+                epoch,
+                train_loss_list,
                 loss_cls_list,
                 loss_box_reg_list,
                 loss_objectness_list,
-                loss_rpn_list,
-                stats[1],
-                stats[0],
-                val_pred_image,
-                IMAGE_SIZE
+                loss_rpn_list
             )
 
-        # Save the current epoch model state. This can be used 
-        # to resume training. It saves model state dict, number of
-        # epochs trained for, optimizer state dict, and loss function.
-        save_model(
-            epoch, 
-            model, 
-            optimizer, 
-            train_loss_list, 
-            train_loss_list_epoch,
-            val_map,
-            val_map_05,
-            OUT_DIR,
-            data_configs,
-            args['model']
-        )
-        # Save the model dictionary only for the current epoch.
-        save_model_state(model, OUT_DIR, data_configs, args['model'])
-        # Save best model if the current mAP @0.5:0.95 IoU is
-        # greater than the last hightest.
-        save_best_model(
-            model, 
-            val_map[-1], 
-            epoch, 
-            OUT_DIR,
-            data_configs,
-            args['model']
-        )
+            # WandB logging.
+            if not args['disable_wandb']:
+                wandb_log(
+                    train_loss_hist.value,
+                    batch_loss_list,
+                    loss_cls_list,
+                    loss_box_reg_list,
+                    loss_objectness_list,
+                    loss_rpn_list,
+                    stats[1],
+                    stats[0],
+                    val_pred_image,
+                    IMAGE_SIZE
+                )
 
-            # Early stopping check.
-        early_stopping(stats[0])
-        if early_stopping.early_stop:
-            break
-            
-        # Save the metric (e.g., mAP or accuracy) for this fold.
-        fold_score = stats[1]  # You can change this to mAP, accuracy, etc.
-        fold_scores.append(fold_score)
+            # Save the current epoch model state. This can be used 
+            # to resume training. It saves model state dict, number of
+            # epochs trained for, optimizer state dict, and loss function.
+            save_model(
+                epoch, 
+                model, 
+                optimizer, 
+                train_loss_list, 
+                train_loss_list_epoch,
+                val_map,
+                val_map_05,
+                OUT_DIR,
+                data_configs,
+                args['model']
+            )
+            # Save the model dictionary only for the current epoch.
+            save_model_state(model, OUT_DIR, data_configs, args['model'])
+            # Save best model if the current mAP @0.5:0.95 IoU is
+            # greater than the last hightest.
+            save_best_model(
+                model, 
+                val_map[-1], 
+                epoch, 
+                OUT_DIR,
+                data_configs,
+                args['model']
+            )
 
-    # After all folds
-    mean_score = np.mean(fold_scores)
-    print(f"KFold Cross-Validation Scores: {fold_scores}")
-    print(f"Mean Score: {mean_score}")
+                # Early stopping check.
+            early_stopping(stats[0])
+            if early_stopping.early_stop:
+                break
+                
+            # Store losses and mAPs for this fold
+            fold_losses.append(train_loss_hist.value)
+            fold_maps.append(stats[0])  # Assuming stats[0] holds the mAP value
+        
+    # After the K-fold cross-validation, calculate the average loss and mAP
+    average_loss = np.mean(fold_losses)
+    average_map = np.mean(fold_maps)
+
+    print(f"Average Loss across {k} folds: {average_loss}")
+    print(f"Average mAP across {k} folds: {average_map}")
 
     # Save models to Weights&Biases.
     if not args['disable_wandb']:
