@@ -287,10 +287,16 @@ def main(args):
             model = create_model(args['model'], num_classes=NUM_CLASSES, pretrained=True)
         else:
             print('Loading pretrained weights...')
+            model = create_model(args['model'], num_classes=NUM_CLASSES)
+            
+            # Load the pretrained checkpoint
             checkpoint = torch.load(args['weights'], map_location=DEVICE)
-            build_model = create_model[args['model']]
-            model = build_model(num_classes=NUM_CLASSES)
             model.load_state_dict(checkpoint['model_state_dict'])
+
+            # Change output features for class predictor and box predictor
+            in_features = model.roi_heads.box_predictor.cls_score.in_features
+            model.roi_heads.box_predictor.cls_score = torch.nn.Linear(in_features, NUM_CLASSES, bias=True)
+            model.roi_heads.box_predictor.bbox_pred = torch.nn.Linear(in_features, NUM_CLASSES * 4, bias=True)
 
         model = model.to(DEVICE)
 
@@ -320,10 +326,9 @@ def main(args):
     # Save models to Weights&Biases (Optional)
     if not args['disable_wandb']:
         wandb_save_model(OUT_DIR)
-
-
-
+        
 if __name__ == '__main__':
     args = parse_opt()
     main(args)
+
 
