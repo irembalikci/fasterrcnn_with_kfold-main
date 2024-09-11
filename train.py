@@ -257,6 +257,9 @@ def main(args):
     IMAGE_SIZE = args['imgsz']
      # Initialize KFold
 
+    kf = KFold(n_splits=5, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
+    fold_scores = []
+
     # Create train/valid datasets for this fold
     train_dataset = create_train_dataset(
         TRAIN_DIR_IMAGES[train_idx], 
@@ -277,10 +280,6 @@ def main(args):
     )
 
     print('Creating data loaders')
-
-    kf = KFold(n_splits=5, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
-    fold_scores = []
-
     for fold, (train_idx, valid_idx) in enumerate(kf.split(np.arange(len(TRAIN_DIR_IMAGES)))):
         print(f"Training Fold {fold+1}")
         
