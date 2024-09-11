@@ -369,9 +369,9 @@ def main(args):
                     val_map_05 = checkpoint['val_map_05']
 
 
-        # Define optimizer and learning rate scheduler.
-        optimizer = torch.optim.SGD(model.parameters(), lr=args['lr'], momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
+    # Define optimizer and learning rate scheduler.
+    optimizer = torch.optim.SGD(model.parameters(), lr=args['lr'], momentum=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
             
     # Make the model transform's `min_size` same as `imgsz` argument. 
     model.transform.min_size = (args['imgsz'], )
