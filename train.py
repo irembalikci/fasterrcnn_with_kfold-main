@@ -257,7 +257,7 @@ def main(args):
 
     # Model configurations
     IMAGE_SIZE = args['imgsz']
-
+    
     train_dataset = create_train_dataset(
         TRAIN_DIR_IMAGES, 
         TRAIN_DIR_LABELS,
@@ -274,6 +274,145 @@ def main(args):
         CLASSES,
         square_training=args['square_training']
     )
+    print('Creating data loaders')
+    if args['distributed']:
+        train_sampler = distributed.DistributedSampler(
+            train_dataset
+        )
+        valid_sampler = distributed.DistributedSampler(
+            valid_dataset, shuffle=False
+        )
+    else:
+        train_sampler = RandomSampler(train_dataset)
+        valid_sampler = SequentialSampler(valid_dataset)
+
+    train_loader = create_train_loader(
+        train_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=train_sampler
+    )
+    valid_loader = create_valid_loader(
+        valid_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=valid_sampler
+    )
+    print(f"Number of training samples: {len(train_dataset)}")
+    print(f"Number of validation samples: {len(valid_dataset)}\n")
+
+    if VISUALIZE_TRANSFORMED_IMAGES:
+        show_tranformed_image(train_loader, DEVICE, CLASSES, COLORS)
+
+    # Initialize the Averager class.
+    train_loss_hist = Averager()
+    # Train and validation loss lists to store loss values of all
+    # iterations till ena and plot graphs for all iterations.
+    train_loss_list = []
+    loss_cls_list = []
+    loss_box_reg_list = []
+    loss_objectness_list = []
+    loss_rpn_list = []
+    train_loss_list_epoch = []
+    val_map_05 = []
+    val_map = []
+    start_epochs = 0
+
+    if args['weights'] is None:
+        print('Building model from models folder...')
+        build_model = create_model[args['model']]
+        model = build_model(num_classes=NUM_CLASSES, pretrained=True)
+
+    # Load pretrained weights if path is provided.
+    if args['weights'] is not None:
+        print('Loading pretrained weights...')
+        
+        # Load the pretrained checkpoint.
+        checkpoint = torch.load(args['weights'], map_location=DEVICE) 
+        keys = list(checkpoint['model_state_dict'].keys())
+        ckpt_state_dict = checkpoint['model_state_dict']
+        # Get the number of classes from the loaded checkpoint.
+        old_classes = ckpt_state_dict['roi_heads.box_predictor.cls_score.weight'].shape[0]
+
+        # Build the new model with number of classes same as checkpoint.
+        build_model = create_model[args['model']]
+        model = build_model(num_classes=old_classes)
+        # Load weights.
+        model.load_state_dict(ckpt_state_dict)
+
+        # Change output features for class predictor and box predictor
+        # according to current dataset classes.
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor.cls_score = torch.nn.Linear(
+            in_features=in_features, out_features=NUM_CLASSES, bias=True
+        )
+        model.roi_heads.box_predictor.bbox_pred = torch.nn.Linear(
+            in_features=in_features, out_features=NUM_CLASSES*4, bias=True
+        )
+
+        if args['resume_training']:
+            print('RESUMING TRAINING...')
+            # Update the starting epochs, the batch-wise loss list, 
+            # and the epoch-wise loss list.
+            if checkpoint['epoch']:
+                start_epochs = checkpoint['epoch']
+                print(f"Resuming from epoch {start_epochs}...")
+            if checkpoint['train_loss_list']:
+                print('Loading previous batch wise loss list...')
+                train_loss_list = checkpoint['train_loss_list']
+            if checkpoint['train_loss_list_epoch']:
+                print('Loading previous epoch wise loss list...')
+                train_loss_list_epoch = checkpoint['train_loss_list_epoch']
+            if checkpoint['val_map']:
+                print('Loading previous mAP list')
+                val_map = checkpoint['val_map']
+            if checkpoint['val_map_05']:
+                val_map_05 = checkpoint['val_map_05']
+
+    # Make the model transform's `min_size` same as `imgsz` argument. 
+    model.transform.min_size = (args['imgsz'], )
+    model = model.to(DEVICE)
+    if args['sync_bn'] and args['distributed']:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    if args['distributed']:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args['gpu']]
+        )
+    try:
+        torchinfo.summary(
+            model, 
+            device=DEVICE, 
+            input_size=(BATCH_SIZE, 3, IMAGE_SIZE, IMAGE_SIZE),
+            row_settings=["var_names"],
+            col_names=("input_size", "output_size", "num_params") 
+        )
+    except:
+        print(model)
+    # Total parameters and trainable parameters.
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"{total_params:,} total parameters.")
+    total_trainable_params = sum(
+        p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{total_trainable_params:,} training parameters.")
+    # Get the model parameters.
+    params = [p for p in model.parameters() if p.requires_grad]
+    # Define the optimizer.
+    optimizer = torch.optim.SGD(params, lr=args['lr'], momentum=0.9, nesterov=True)
+    # optimizer = torch.optim.AdamW(params, lr=0.0001, weight_decay=0.0005)
+    if args['resume_training']: 
+        # LOAD THE OPTIMIZER STATE DICTIONARY FROM THE CHECKPOINT.
+        print('Loading optimizer state dictionary...')
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    if args['cosine_annealing']:
+        # LR will be zero as we approach `steps` number of epochs each time.
+        # If `steps = 5`, LR will slowly reduce to zero every 5 epochs.
+        steps = NUM_EPOCHS + 10
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 
+            T_0=steps,
+            T_mult=1,
+            verbose=False
+        )
+    else:
+        scheduler = None
+
+    save_best_model = SaveBestModel()
+    early_stopping = EarlyStopping(patience=args['patience'])
     
     # Initialize KFold
     k=5
@@ -293,138 +432,9 @@ def main(args):
         # Create the data loaders
         train_loader = create_train_loader(train_subset, BATCH_SIZE, NUM_WORKERS)
         valid_loader = create_valid_loader(valid_subset, BATCH_SIZE, NUM_WORKERS)
-
-        # if args['distributed']:
-        #     train_sampler = distributed.DistributedSampler(train_dataset)
-        #     valid_sampler = distributed.DistributedSampler(valid_dataset, shuffle=False)
-        # else:
-        #     train_sampler = RandomSampler(train_dataset)
-        #     valid_sampler = SequentialSampler(valid_dataset)
-
-        #train_loader = create_train_loader(train_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=train_sampler)
-        #valid_loader = create_valid_loader(valid_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=valid_sampler)
         
         print(f"Number of training samples: {len(train_dataset)}")
         print(f"Number of validation samples: {len(valid_dataset)}\n")
-
-        if VISUALIZE_TRANSFORMED_IMAGES:
-            show_tranformed_image(train_loader, DEVICE, CLASSES, COLORS)
-
-        # Initialize the Averager class.
-        train_loss_hist = Averager()
-        # Train and validation loss lists to store loss values of all
-        # iterations till ena and plot graphs for all iterations.
-        train_loss_list = []
-        loss_cls_list = []
-        loss_box_reg_list = []
-        loss_objectness_list = []
-        loss_rpn_list = []
-        train_loss_list_epoch = []
-        val_map_05 = []
-        val_map = []
-        start_epochs = 0
-
-        # Load pretrained weights if path is provided.
-        if args['weights'] is not None:
-            print('Loading pretrained weights...')
-            
-            # Load the pretrained checkpoint.
-            checkpoint = torch.load(args['weights'], map_location=DEVICE) 
-            keys = list(checkpoint['model_state_dict'].keys())
-            ckpt_state_dict = checkpoint['model_state_dict']
-            # Get the number of classes from the loaded checkpoint.
-            old_classes = ckpt_state_dict['roi_heads.box_predictor.cls_score.weight'].shape[0]
-
-            # Build the new model with number of classes same as checkpoint.
-            build_model = create_model[args['model']]
-            model = build_model(num_classes=old_classes)
-            # Load weights.
-            model.load_state_dict(ckpt_state_dict)
-
-            # Change output features for class predictor and box predictor
-            # according to current dataset classes.
-            in_features = model.roi_heads.box_predictor.cls_score.in_features
-            model.roi_heads.box_predictor.cls_score = torch.nn.Linear(
-                in_features=in_features, out_features=NUM_CLASSES, bias=True
-            )
-            model.roi_heads.box_predictor.bbox_pred = torch.nn.Linear(
-                in_features=in_features, out_features=NUM_CLASSES*4, bias=True
-            )
-
-            if args['resume_training']:
-                print('RESUMING TRAINING...')
-                # Update the starting epochs, the batch-wise loss list, 
-                # and the epoch-wise loss list.
-                if checkpoint['epoch']:
-                    start_epochs = checkpoint['epoch']
-                    print(f"Resuming from epoch {start_epochs}...")
-                if checkpoint['train_loss_list']:
-                    print('Loading previous batch wise loss list...')
-                    train_loss_list = checkpoint['train_loss_list']
-                if checkpoint['train_loss_list_epoch']:
-                    print('Loading previous epoch wise loss list...')
-                    train_loss_list_epoch = checkpoint['train_loss_list_epoch']
-                if checkpoint['val_map']:
-                    print('Loading previous mAP list')
-                    val_map = checkpoint['val_map']
-                if checkpoint['val_map_05']:
-                    val_map_05 = checkpoint['val_map_05']
-
-
-        # Define optimizer and learning rate scheduler.
-        optimizer = torch.optim.SGD(model.parameters(), lr=args['lr'], momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
-            
-        # Make the model transform's `min_size` same as `imgsz` argument. 
-        model.transform.min_size = (args['imgsz'], )
-        model = model.to(DEVICE)
-        if args['sync_bn'] and args['distributed']:
-            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        if args['distributed']:
-            model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[args['gpu']]
-            )
-        try:
-            torchinfo.summary(
-                model, 
-                device=DEVICE, 
-                input_size=(BATCH_SIZE, 3, IMAGE_SIZE, IMAGE_SIZE),
-                row_settings=["var_names"],
-                col_names=("input_size", "output_size", "num_params") 
-            )
-        except:
-            print(model)
-        # Total parameters and trainable parameters.
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"{total_params:,} total parameters.")
-        total_trainable_params = sum(
-            p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"{total_trainable_params:,} training parameters.")
-        # Get the model parameters.
-        params = [p for p in model.parameters() if p.requires_grad]
-        # Define the optimizer.
-        optimizer = torch.optim.SGD(params, lr=args['lr'], momentum=0.9, nesterov=True)
-        # optimizer = torch.optim.AdamW(params, lr=0.0001, weight_decay=0.0005)
-        if args['resume_training']: 
-            # LOAD THE OPTIMIZER STATE DICTIONARY FROM THE CHECKPOINT.
-            print('Loading optimizer state dictionary...')
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-        if args['cosine_annealing']:
-            # LR will be zero as we approach `steps` number of epochs each time.
-            # If `steps = 5`, LR will slowly reduce to zero every 5 epochs.
-            steps = NUM_EPOCHS + 10
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, 
-                T_0=steps,
-                T_mult=1,
-                verbose=False
-            )
-        else:
-            scheduler = None
-
-        save_best_model = SaveBestModel()
-        early_stopping = EarlyStopping(patience=args['patience'])
 
         for epoch in range(start_epochs, NUM_EPOCHS):
             train_loss_hist.reset()
