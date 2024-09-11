@@ -312,13 +312,6 @@ class CustomDataset(Dataset):
             torch.tensor(np.array(final_classes)), area, iscrowd, dims
 
     def __getitem__(self, idx):
-        # Check if index is valid
-        if idx >= len(self.all_images):
-            print(f"Index {idx} is out of range for dataset size {len(self.all_images)}")
-            raise IndexError(f"Index {idx} is out of range")
-        
-        # Proceed with loading the image and labels
-        labels, area, iscrowd, dims = self.load_image_and_labels(idx)
         if not self.train: # No mosaic during validation.
             image, image_resized, orig_boxes, boxes, \
                 labels, area, iscrowd, dims = self.load_image_and_labels(
