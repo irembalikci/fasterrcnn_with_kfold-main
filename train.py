@@ -425,6 +425,12 @@ def main(args):
     for fold, (train_indices, valid_indices) in enumerate(kf.split(train_dataset)):
         print(f"Fold {fold+1}/{k}")
 
+        print(f"Fold {fold+1}/{k}")
+        print(f"Train indices: {train_indices}")
+        print(f"Validation indices: {valid_indices}")
+        print(f"Number of training samples: {len(train_indices)}")
+        print(f"Number of validation samples: {len(valid_indices)}")
+
         # Split dataset into training and validation sets for this fold
         train_subset = Subset(train_dataset, train_indices)
         valid_subset = Subset(valid_dataset, valid_indices)
