@@ -255,53 +255,48 @@ def main(args):
 
     # Model configurations
     IMAGE_SIZE = args['imgsz']
-     # Initialize KFold
-
+    
+    # Initialize KFold
     kf = KFold(n_splits=5, shuffle=True, random_state=args['seed'])  # You can change n_splits based on the folds you want
     fold_scores = []
 
-
-
-    print('Creating data loaders')
     for fold, (train_idx, valid_idx) in enumerate(kf.split(np.arange(len(TRAIN_DIR_IMAGES)))):
         print(f"Training Fold {fold+1}")
-
+        
         # Create train/valid datasets for this fold
+        train_images = TRAIN_DIR_IMAGES[train_idx]
+        train_labels = TRAIN_DIR_LABELS[train_idx]
+        
+        valid_images = VALID_DIR_IMAGES[valid_idx]
+        valid_labels = VALID_DIR_LABELS[valid_idx]
+
         train_dataset = create_train_dataset(
-            TRAIN_DIR_IMAGES[train_idx], 
-            TRAIN_DIR_LABELS[train_idx],
-            IMAGE_SIZE,
+            train_images, 
+            train_labels,
+            args['imgsz'], 
             CLASSES,
             use_train_aug=args['use_train_aug'],
             mosaic=args['mosaic'],
             square_training=args['square_training']
         )
-            
+        
         valid_dataset = create_valid_dataset(
-            VALID_DIR_IMAGES[valid_idx], 
-            VALID_DIR_LABELS[valid_idx], 
-            IMAGE_SIZE,
+            valid_images, 
+            valid_labels, 
+            args['imgsz'], 
             CLASSES,
             square_training=args['square_training']
         )
-        
+
         if args['distributed']:
-            train_sampler = distributed.DistributedSampler(
-                train_dataset
-            )
-            valid_sampler = distributed.DistributedSampler(
-                valid_dataset, shuffle=False
-            )
+            train_sampler = distributed.DistributedSampler(train_dataset)
+            valid_sampler = distributed.DistributedSampler(valid_dataset, shuffle=False)
         else:
             train_sampler = RandomSampler(train_dataset)
             valid_sampler = SequentialSampler(valid_dataset)
 
-        train_loader = create_train_loader(
-            train_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=train_sampler
-        )
-        valid_loader = create_valid_loader(
-            valid_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=valid_sampler
-        )
+        train_loader = create_train_loader(train_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=train_sampler)
+        valid_loader = create_valid_loader(valid_dataset, BATCH_SIZE, NUM_WORKERS, batch_sampler=valid_sampler)
         
         print(f"Number of training samples: {len(train_dataset)}")
         print(f"Number of validation samples: {len(valid_dataset)}\n")
